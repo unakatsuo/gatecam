@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -51,15 +52,31 @@ func main() {
 	webcam.Set(gocv.VideoCaptureFrameHeight, 480.0)
 	log.Printf("capure depth: %d x %d", int(webcam.Get(gocv.VideoCaptureFrameWidth)), int(webcam.Get(gocv.VideoCaptureFrameHeight)))
 
+	store := &LocalStore{baseDir: "localstore"}
+	if err := store.Setup(); err != nil {
+		log.Printf("%T: %s", store, err)
+		return
+	}
+
+	sess := session.Must(session.NewSession(&aws.Config{
+		Region:      aws.String(settings.AwsRegion),
+		Credentials: credentials.NewStaticCredentials(settings.AwsAccessKeyID, settings.AwsSecretAccessKey, ""),
+	}))
+
+	if err := watch(store, sess); err != nil {
+		log.Print("watch: ", err)
+		return
+	}
+
 	// Discard first number of frames until the camera stabilizes brightness.
 	webcam.Grab(10)
 	for {
-		capture(webcam)
+		capture(webcam, store, sess)
 	}
 
 }
 
-func capture(webcam *gocv.VideoCapture) {
+func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 	frame := gocv.NewMat()
 	defer frame.Close()
 
@@ -78,11 +95,6 @@ func capture(webcam *gocv.VideoCapture) {
 		return
 	}
 	ioutil.WriteFile("capture.jpg", jpegBytes, 0644)
-
-	sess := session.Must(session.NewSession(&aws.Config{
-		Region:      aws.String(settings.AwsRegion),
-		Credentials: credentials.NewStaticCredentials(settings.AwsAccessKeyID, settings.AwsSecretAccessKey, ""),
-	}))
 
 	imageInput := &rekognition.Image{
 		Bytes: jpegBytes,
@@ -160,9 +172,93 @@ func capture(webcam *gocv.VideoCapture) {
 				return err
 			}
 			identify(jpegBytes)
-			ioutil.WriteFile(fmt.Sprintf("guest%d.jpg", idx), jpegBytes, 0644)
+			if err := store.SaveGuest(jpegBytes, idx); err != nil {
+				log.Printf("%T: %s", store, err)
+			}
 			return nil
 		}()
 	}
 
+}
+
+type FaceKey struct {
+	Name  string
+	Index string
+}
+
+type SyncFunc func([]FaceKey) error
+
+type Store interface {
+	Setup() error
+	SaveGuest(img []byte, idx int) error
+	Watch(synccb SyncFunc) error
+	ReadImage(key FaceKey) ([]byte, error)
+}
+
+func watch(store Store, sess *session.Session) error {
+
+	synccb := func(locals []FaceKey) error {
+		reko := rekognition.New(sess)
+
+		input := &rekognition.ListFacesInput{
+			CollectionId: aws.String(settings.AwsRekognitionCollectionID),
+		}
+		output, err := reko.ListFaces(input)
+		if err != nil {
+			log.Print(err)
+			return err
+		}
+
+		registered := [][2]string{}
+		for _, f := range output.Faces {
+			if f.ExternalImageId == nil {
+				continue
+			}
+			i := strings.SplitN(*f.ExternalImageId, "_", 2)
+			if len(i) != 2 {
+				log.Print("Skipped externalImageId: ", *f.ExternalImageId)
+				continue
+			}
+
+			registered = append(registered, [2]string{i[0], i[1]})
+		}
+
+		newkeys := []FaceKey{}
+		for _, k := range locals {
+			func() {
+				for _, k2 := range registered {
+					if k.Name == k2[0] && k.Index == k2[1] {
+						return
+					}
+				}
+				newkeys = append(newkeys, k)
+			}()
+		}
+
+		for _, k := range newkeys {
+			jpegBytes, err := store.ReadImage(k)
+			if err != nil {
+				log.Print("store.ReadImage: ", err)
+				continue
+			}
+			input := &rekognition.IndexFacesInput{
+				CollectionId:    aws.String(settings.AwsRekognitionCollectionID),
+				ExternalImageId: aws.String(fmt.Sprintf("%s_%s", k.Name, k.Index)),
+				Image: &rekognition.Image{
+					Bytes: jpegBytes,
+				},
+			}
+			_, err = reko.IndexFaces(input)
+			if err != nil {
+				log.Print("rekognition.IndexFaces: ", err)
+			}
+			log.Print("Indexed new face: ", k)
+		}
+		return nil
+	}
+
+	if err := store.Watch(synccb); err != nil {
+		return err
+	}
+	return nil
 }
