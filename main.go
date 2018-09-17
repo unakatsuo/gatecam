@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"image"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -134,7 +136,7 @@ func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 		return
 	}
 
-	identify := func(jpegBytes []byte) error {
+	identify := func(jpegBytes []byte, idx int) error {
 
 		imageInput := &rekognition.Image{
 			Bytes: jpegBytes,
@@ -151,13 +153,31 @@ func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 
 		log.Print("SeachFaceByImage result: ", len(output.FaceMatches))
 
+		if len(output.FaceMatches) == 0 {
+			if err := store.SaveGuest(jpegBytes, idx); err != nil {
+				log.Printf("%T: %s", store, err)
+			}
+			return nil
+		}
+
+		results := []faceSimilarity{}
 		for _, f := range output.FaceMatches {
 			if f.Face.ExternalImageId == nil {
-				log.Print("Found guest: face_id=", *f.Face.FaceId)
-			} else {
-				log.Print("Identified ", *f.Face.ExternalImageId)
+				log.Print("Found but no exterImageId attribute: face_id=", *f.Face.FaceId)
+				continue
 			}
+			k, err := ParseFaceKey(*f.Face.ExternalImageId)
+			if err != nil {
+				continue
+			}
+			results = append(results, faceSimilarity{k, *f.Similarity})
 		}
+		if len(results) == 0 {
+			return nil
+		}
+		sort.Sort(bySimilarity(results))
+		log.Print("Identified: ", results[0].Key.Name)
+
 		return nil
 	}
 
@@ -171,19 +191,42 @@ func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 				log.Print(err)
 				return err
 			}
-			identify(jpegBytes)
-			if err := store.SaveGuest(jpegBytes, idx); err != nil {
-				log.Printf("%T: %s", store, err)
-			}
+			identify(jpegBytes, idx)
 			return nil
 		}()
 	}
 
 }
 
+type faceSimilarity struct {
+	Key        FaceKey
+	Similarity float64
+}
+type bySimilarity []faceSimilarity
+
+func (c bySimilarity) Len() int {
+	return len(c)
+}
+
+func (c bySimilarity) Less(i, j int) bool {
+	return c[i].Similarity < c[j].Similarity
+}
+
+func (c bySimilarity) Swap(i, j int) {
+	c[i], c[j] = c[j], c[i]
+}
+
 type FaceKey struct {
 	Name  string
 	Index string
+}
+
+func ParseFaceKey(s string) (FaceKey, error) {
+	i := strings.SplitN(s, "_", 2)
+	if len(i) != 2 {
+		return FaceKey{}, errors.New("Invalid face key syntax")
+	}
+	return FaceKey{i[0], i[1]}, nil
 }
 
 type SyncFunc func([]FaceKey) error
