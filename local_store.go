@@ -25,6 +25,10 @@ func (store *LocalStore) catalogueDir() string {
 	return filepath.Join(store.baseDir, "catalogue")
 }
 
+func (store *LocalStore) recordDir() string {
+	return filepath.Join(store.baseDir, "records")
+}
+
 func (store *LocalStore) Setup() error {
 	_, err := os.Stat(store.guestDir())
 	if os.IsNotExist(err) {
@@ -35,8 +39,23 @@ func (store *LocalStore) Setup() error {
 	return nil
 }
 
+func (store *LocalStore) RecordDetectedName(now time.Time, name string) error {
+	dateFolder := filepath.Join(store.recordDir(), "detected", now.Format("20060102"))
+	if err := os.MkdirAll(dateFolder, 0755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dateFolder, now.Format("20060102150405")+"-"+name), os.O_CREATE|os.O_WRONLY, 644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return nil
+}
+
 func (store *LocalStore) SaveGuest(img []byte, idx int) error {
 	path := filepath.Join(store.guestDir(), fmt.Sprintf("%s-%d.jpg", time.Now().Format("20060102-150405"), idx))
+	log.Print("Saving guest photo: ", path)
+
 	return ioutil.WriteFile(path, img, 0644)
 }
 

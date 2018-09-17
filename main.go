@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -117,7 +118,6 @@ func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 		}
 
 		res := make([]image.Rectangle, len(output.FaceDetails))
-		log.Print(output)
 		for idx, f := range output.FaceDetails {
 			// DetectFaces API can return the bounding box value in out of image dimension.
 			// They needs to be capped from 0.0 to 1.0.
@@ -135,6 +135,7 @@ func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 	if err != nil {
 		return
 	}
+	namesDetected := make(map[string]int)
 
 	identify := func(jpegBytes []byte, idx int) error {
 
@@ -150,8 +151,6 @@ func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 			log.Println(err)
 			return err
 		}
-
-		log.Print("SeachFaceByImage result: ", len(output.FaceMatches))
 
 		if len(output.FaceMatches) == 0 {
 			if err := store.SaveGuest(jpegBytes, idx); err != nil {
@@ -177,7 +176,7 @@ func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 		}
 		sort.Sort(bySimilarity(results))
 		log.Print("Identified: ", results[0].Key.Name)
-
+		namesDetected[results[0].Key.Name]++
 		return nil
 	}
 
@@ -196,6 +195,12 @@ func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 		}()
 	}
 
+	now := time.Now()
+	for n, _ := range namesDetected {
+		if err := store.RecordDetectedName(now, n); err != nil {
+			log.Print(err)
+		}
+	}
 }
 
 type faceSimilarity struct {
@@ -236,6 +241,7 @@ type Store interface {
 	SaveGuest(img []byte, idx int) error
 	Watch(synccb SyncFunc) error
 	ReadImage(key FaceKey) ([]byte, error)
+	RecordDetectedName(now time.Time, name string) error
 }
 
 func watch(store Store, sess *session.Session) error {
