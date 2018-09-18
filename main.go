@@ -83,6 +83,18 @@ func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 	frame := gocv.NewMat()
 	defer frame.Close()
 
+	lab := gocv.NewMat()
+	defer lab.Close()
+
+	hist := gocv.NewMat()
+	defer hist.Close()
+
+	mgr := gocv.NewMat()
+	defer mgr.Close()
+
+	fimg := gocv.NewMat()
+	defer fimg.Close()
+
 	if ok := webcam.Read(&frame); !ok {
 		log.Print("Device closed: ", settings.WebCamDevID)
 		return
@@ -92,7 +104,19 @@ func capture(webcam *gocv.VideoCapture, store Store, sess *session.Session) {
 		return
 	}
 
-	jpegBytes, err := gocv.IMEncode(gocv.JPEGFileExt, frame)
+	// Histgram Equalization
+	gocv.CvtColor(frame, &lab, gocv.ColorBGRToLab)
+	mv := gocv.Split(lab)
+
+	gocv.EqualizeHist(mv[0], &hist)
+	gocv.Merge([]gocv.Mat{hist, mv[1], mv[2]}, &mgr)
+	gocv.CvtColor(mgr, &fimg, gocv.ColorLabToBGR)
+
+	for _, m := range mv {
+		m.Close()
+	}
+
+	jpegBytes, err := gocv.IMEncode(gocv.JPEGFileExt, fimg)
 	if err != nil {
 		log.Print(err)
 		return
